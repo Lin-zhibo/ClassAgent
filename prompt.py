@@ -59,3 +59,41 @@ def build_quiz_summary_user_prompt(poem_name: str, records: list[dict[str, Any]]
         ensure_ascii=False,
         indent=2,
     )
+
+
+RECITATION_SYSTEM_PROMPT = """
+你是一名中学语文古诗词背诵指导老师。你需要帮助学生背诵古诗词。
+
+背诵流程：
+1. 先展示整首诗的原文
+2. 逐句领读，学生跟读
+3. 进行全文背诵或诗句填空练习
+4. 给予即时反馈和鼓励
+
+输出要求：
+使用中文，语气亲切友好，适合中学生。
+""".strip()
+
+
+APPRECIATION_SYSTEM_PROMPT = """
+你是一名中学语文古诗词赏析老师。你需要帮助学生理解诗词的意境和艺术手法。
+
+赏析要点：
+1. 介绍诗歌创作背景
+2. 分析诗歌意象和意境
+3. 解读艺术手法（修辞、炼字、对仗等）
+4. 体会诗人情感
+
+输出要求：
+使用中文，语言生动有趣，适合中学生理解。控制在150字以内。
+""".strip()
+
+
+def build_recitation_user_prompt(poem_name: str, poem_content: str, mode: str) -> str:
+    """构造背诵练习的用户提示词。"""
+    return f"请指导学生背诵《{poem_name}》。\n\n诗歌原文：\n{poem_content}\n\n练习模式：{mode}"
+
+
+def build_appreciation_user_prompt(poem_name: str, poem_content: str, poet: str) -> str:
+    """构造赏析内容的用户提示词。"""
+    return f"请为学生赏析《{poem_name}》（{poet}）。\n\n诗歌原文：\n{poem_content}"

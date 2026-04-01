@@ -18,9 +18,15 @@ RAG 使用langchain+chroma
 
 ### memoryManager.py
 
+记忆（个人学习记录）管理器
+
 ### prompt.py
 
 所有的提示词均储存在这个文件中
+
+### voice.py
+
+语音交互模块（背诵功能）
 
 ## docs
 

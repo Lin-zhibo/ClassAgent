@@ -1,4 +1,4 @@
-"""交互式教学 Shell：当前仅完整实现“测验”模式。"""
+#交互式教学 Shell：支持背诵、理解、赏析、测验四种学习模式。
 
 from __future__ import annotations
 
@@ -12,12 +12,23 @@ from pathlib import Path
 from typing import Any
 
 from agent import LLMClient
+from memoryManager import (
+    add_wrong_question,
+    get_next_recommended_poem,
+    load_wrong_questions,
+    save_learning_record,
+    update_profile_after_quiz,
+)
 from prompt import (
+    APPRECIATION_SYSTEM_PROMPT,
     QUIZ_EVALUATION_SYSTEM_PROMPT,
     QUIZ_SUMMARY_SYSTEM_PROMPT,
+    RECITATION_SYSTEM_PROMPT,
+    build_appreciation_user_prompt,
     build_quiz_evaluation_user_prompt,
     build_quiz_summary_user_prompt,
 )
+from RAG import retrieve
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 QUESTION_BANK_PATH = PROJECT_ROOT / "data" / "questions.CSV"
@@ -114,19 +125,266 @@ def show_mode_menu(poem_name: str) -> str:
     return input("请输入模式编号: ").strip()
 
 
+def get_poem_content_from_rag(poem_name: str) -> str | None:
+    """从 RAG 获取诗歌原文。"""
+    results = retrieve(query=f"{poem_name} 原文", poet=None, poem=poem_name, k=3)
+    for item in results:
+        content = item.get("content", "")
+        if "原文" in content or any(char in content for char in "，、。"):
+            return content
+    return None
+
+
 def handle_recitation(poem_name: str) -> None:
-    """背诵模式接口占位。"""
-    print(f"[{poem_name}] 背诵功能正在开发中")
+    """背诵模式主流程：支持整诗背诵和诗句填空。"""
+    print(f"\n{'='*50}")
+    print(f"📖 开始背诵练习：《{poem_name}》")
+    print(f"{'='*50}")
+
+    poem_content = get_poem_content_from_rag(poem_name)
+
+    if not poem_content:
+        print(f"提示：暂无《{poem_name}》的原文数据，背诵功能需要诗歌原文支持。")
+        print("请确保已导入包含诗歌原文的数据。")
+        return
+
+    print("\n【整诗展示】")
+    print(poem_content)
+
+    mode_choice = input("\n请选择背诵方式：\n1. 整诗背诵\n2. 诗句填空\n0. 返回\n请输入: ").strip()
+
+    if mode_choice == "1":
+        _handle_full_recitation(poem_name, poem_content)
+    elif mode_choice == "2":
+        _handle_fill_blank(poem_name, poem_content)
+    else:
+        print("已返回。")
+
+
+def _handle_full_recitation(poem_name: str, poem_content: str) -> None:
+    """整诗背诵：学生尝试背诵全诗。"""
+    print("\n【整诗背诵】请尝试背诵整首诗，输入 q 退出：")
+
+    lines = [line.strip() for line in poem_content.replace("，", "，\n").replace("。", "。\n").split("\n") if line.strip()]
+    if not lines:
+        lines = poem_content.split("\n")
+
+    correct_count = 0
+    total_count = len(lines)
+
+    for i, expected_line in enumerate(lines, 1):
+        expected_clean = normalize_text(expected_line)
+        print(f"\n第 {i}/{total_count} 句: {expected_line[:10]}...")
+        user_input = input("请背诵这一句（或输入 q 退出）: ").strip()
+
+        if user_input.lower() in QUIT_WORDS:
+            break
+
+        user_clean = normalize_text(user_input)
+        similarity = SequenceMatcher(None, user_clean, expected_clean).ratio()
+
+        if similarity >= 0.6:
+            print("✓ 正确！")
+            correct_count += 1
+        elif similarity >= 0.3:
+            print(f"△ 大致正确（{similarity:.0%}），参考答案：{expected_line}")
+            correct_count += 0.5
+        else:
+            print(f"✗ 不正确。参考答案：{expected_line}")
+
+    score = (correct_count / total_count * 100) if total_count > 0 else 0
+    print(f"\n背诵完成！得分：{correct_count:.1f}/{total_count} ({score:.0f}%)")
+
+    save_learning_record(poem_name=poem_name, mode="背诵", score=correct_count/total_count if total_count > 0 else 0, question_count=total_count)
+
+
+def _handle_fill_blank(poem_name: str, poem_content: str) -> None:
+    """诗句填空：给出上句或下句，让学生补全。"""
+    print("\n【诗句填空】根据提示补全诗句：")
+
+    all_lines = [line.strip() for line in poem_content.replace("，", "\n").replace("。", "\n").split("\n") if line.strip()]
+    if len(all_lines) < 2:
+        print("诗句数量不足，无法进行填空练习。")
+        return
+
+    random.shuffle(all_lines)
+    questions_to_ask = all_lines[:min(5, len(all_lines))]
+
+    correct = 0
+    for i, full_line in enumerate(questions_to_ask, 1):
+        mid = len(full_line) // 2
+        hint = full_line[:mid] + "..." + full_line[-2:] if len(full_line) > 4 else full_line[:2] + "..."
+
+        print(f"\n第 {i}/{len(questions_to_ask)} 题：")
+        print(f"诗句：{hint}")
+        user_answer = input("补全诗句: ").strip()
+
+        if user_answer.lower() in QUIT_WORDS:
+            break
+
+        similarity = SequenceMatcher(None, normalize_text(user_answer), normalize_text(full_line)).ratio()
+
+        if similarity >= 0.7:
+            print("✓ 正确！")
+            correct += 1
+        else:
+            print(f"✗ 参考答案：{full_line}")
+
+    score = correct / len(questions_to_ask) if questions_to_ask else 0
+    print(f"\n填空完成！得分：{correct}/{len(questions_to_ask)} ({score*100:.0f}%)")
+
+    save_learning_record(poem_name=poem_name, mode="背诵-填空", score=score, question_count=len(questions_to_ask))
 
 
 def handle_understanding(poem_name: str) -> None:
-    """理解模式接口占位。"""
-    print(f"[{poem_name}] 理解功能正在开发中")
+    """理解模式：展示诗歌注释和翻译，帮助学生理解诗意。"""
+    print(f"\n{'='*50}")
+    print(f"📚 开始理解学习：《{poem_name}》")
+    print(f"{'='*50}")
+
+    client = try_create_llm_client()
+
+    results = retrieve(query=f"{poem_name} 注释 翻译 理解", poem=poem_name, k=5)
+
+    if results:
+        print("\n【诗歌注释与翻译】")
+        shown_answers = set()
+        for item in results:
+            answer = item.get("answer", "")
+            if answer and answer not in shown_answers and len(answer) > 5:
+                print(f"\n{answer}")
+                shown_answers.add(answer)
+                if len(shown_answers) >= 4:
+                    break
+
+        if client:
+            print("\n【AI 助手讲解】")
+            try:
+                poem_content = results[0].get("content", "") if results else ""
+                user_prompt = f"请用通俗易懂的语言，为中学生解释《{poem_name}》的含义：\n{poem_content}"
+                explanation = client.chat(
+                    user_message=user_prompt,
+                    system_message="你是一名中学语文老师，请用简单生动的语言解释古诗词，帮助学生理解诗意。",
+                    temperature=0.7,
+                    max_tokens=300,
+                )
+                print(explanation)
+            except Exception as e:
+                print(f"AI讲解暂时不可用: {e}")
+    else:
+        print(f"\n暂无《{poem_name}》的详细注释和翻译数据。")
+        print("请确保题库中包含相关理解性问题。")
+
+    print("\n【学习检测】")
+    practice_choice = input("是否进行理解检测？（输入 y 开始，不输入则返回）: ").strip()
+    if practice_choice.lower() == "y":
+        _run_understanding_quiz(poem_name, client)
+
+    save_learning_record(poem_name=poem_name, mode="理解", score=1.0, question_count=0)
+
+
+def _run_understanding_quiz(poem_name: str, client: LLMClient | None) -> None:
+    """理解模式下的简单检测。"""
+    results = retrieve(query=f"{poem_name} 理解 诗意 主旨", poem=poem_name, k=3)
+
+    if not results:
+        print("没有找到相关的理解性问题。")
+        return
+
+    question_item = results[0]
+    question = question_item.get("question", "")
+    answer = question_item.get("answer", "")
+
+    print(f"\n理解检测：{question}")
+    user_answer = input("你的回答: ").strip()
+
+    if user_answer.lower() in QUIT_WORDS:
+        return
+
+    eval_result = evaluate_answer(client, poem_name, question, answer, user_answer)
+    print(f"\n判定：{eval_result.result}")
+    print(f"反馈：{eval_result.feedback}")
+    print(f"参考答案：{answer}")
 
 
 def handle_appreciation(poem_name: str) -> None:
-    """赏析模式接口占位。"""
-    print(f"[{poem_name}] 赏析功能正在开发中")
+    """赏析模式：展示诗歌创作背景、艺术手法、意境赏析。"""
+    print(f"\n{'='*50}")
+    print(f"✨ 开始赏析学习：《{poem_name}》")
+    print(f"{'='*50}")
+
+    client = try_create_llm_client()
+
+    results = retrieve(query=f"{poem_name} 赏析 意境 艺术手法", poem=poem_name, k=5)
+
+    if results:
+        print("\n【赏析要点】")
+        shown_content = set()
+        for item in results:
+            content = item.get("content", "")
+            answer = item.get("answer", "")
+
+            if answer and answer not in shown_content and len(answer) > 10:
+                if any(kw in answer for kw in ["赏析", "意境", "艺术", "情感", "手法", "名句"]):
+                    print(f"\n{answer}")
+                    shown_content.add(answer)
+
+        if client:
+            print("\n【AI 赏析】")
+            try:
+                poem_info = "\n".join([item.get("content", "")[:200] for item in results[:2]])
+                user_prompt = build_appreciation_user_prompt(
+                    poem_name=poem_name,
+                    poem_content=poem_info,
+                    poet=results[0].get("poet", "未知")
+                )
+                appreciation = client.chat(
+                    user_message=user_prompt,
+                    system_message=APPRECIATION_SYSTEM_PROMPT,
+                    temperature=0.7,
+                    max_tokens=300,
+                )
+                print(appreciation)
+            except Exception:
+                pass
+    else:
+        if client:
+            print("\n【AI 赏析】")
+            try:
+                user_prompt = f"请为中学生赏析《{poem_name}》，包括创作背景、意象分析、艺术手法、情感体会。"
+                appreciation = client.chat(
+                    user_message=user_prompt,
+                    system_message=APPRECIATION_SYSTEM_PROMPT,
+                    temperature=0.7,
+                    max_tokens=300,
+                )
+                print(appreciation)
+            except Exception:
+                print(f"暂无《{poem_name}》的赏析数据，AI赏析暂时不可用。")
+        else:
+            print(f"暂无《{poem_name}》的赏析数据。")
+
+    print("\n【名句赏析练习】")
+    _practice_famous_line(poem_name, client)
+
+    save_learning_record(poem_name=poem_name, mode="赏析", score=1.0, question_count=0)
+
+
+def _practice_famous_line(poem_name: str, client: LLMClient | None) -> None:
+    """名句赏析练习。"""
+    results = retrieve(query=f"{poem_name} 名句 赏析", poem=poem_name, k=3)
+
+    famous_line_keywords = ["大漠孤烟直", "长河落日圆", "海内存知己", "天涯若比邻", "春风得意", "一日看尽"]
+
+    for item in results:
+        answer = item.get("answer", "")
+        if any(kw in answer for kw in famous_line_keywords):
+            question = item.get("question", "")
+            print(f"\n题目：{question}")
+            print(f"参考赏析：{answer[:150]}...")
+            break
+    else:
+        print("暂无名句赏析练习数据。")
 
 
 def load_mock_user_profile() -> dict[str, str]:
@@ -505,6 +763,7 @@ def handle_quiz(poem_name: str, question_bank: list[QuizQuestion]) -> None:
 
     print("测验开始，输入 q 可随时结束本轮。")
     records: list[dict[str, Any]] = []
+    consecutive_errors = 0
 
     for index, question_item in enumerate(selected_questions, start=1):
         should_quit, record = run_single_quiz_question(
@@ -514,8 +773,24 @@ def handle_quiz(poem_name: str, question_bank: list[QuizQuestion]) -> None:
             index=index,
             total=len(selected_questions),
         )
+
         if record is not None:
             records.append(record)
+
+            if record.get("final_result") == "incorrect":
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    print(f"\n⚠️ 已连续错误3次，自动记录到错题本。")
+                    add_wrong_question(
+                        poem_name=poem_name,
+                        poet=question_item.poet,
+                        question=question_item.question,
+                        standard_answer=question_item.answer,
+                        student_answer=record.get("student_answer", ""),
+                    )
+            else:
+                consecutive_errors = 0
+
         if should_quit:
             print("已根据你的输入提前结束本轮测验。")
             break
@@ -529,8 +804,38 @@ def handle_quiz(poem_name: str, question_bank: list[QuizQuestion]) -> None:
 
     print("\n学习总结：")
     print(summary_text)
-    print("学习记录保存功能正在开发中")
-    print("下一首诗推荐功能正在开发中")
+
+    total_score = sum(float(record.get("score", 0.0)) for record in records)
+    accuracy = total_score / len(records) if records else 0
+
+    update_profile_after_quiz(poem_name, accuracy)
+
+    wrong_questions = load_wrong_questions()
+    poem_wrong = [w for w in wrong_questions if w.get("poem") == poem_name]
+    if poem_wrong:
+        print(f"\n📝 错题本更新：已记录 {len(poem_wrong)} 道《{poem_name}》相关错题")
+
+    save_learning_record(
+        poem_name=poem_name,
+        mode="测验",
+        score=accuracy,
+        question_count=len(records),
+    )
+    print("✅ 学习记录已保存")
+
+    all_poems = get_available_poems(question_bank)
+    next_poem = get_next_recommended_poem(all_poems)
+    if next_poem and next_poem != poem_name:
+        print(f"\n📌 下一首推荐：《{next_poem}》")
+        recommend_choice = input("是否切换到该诗继续学习？（输入 y 切换，不输入则返回菜单）: ").strip()
+        if recommend_choice.lower() == "y":
+            start_quiz_or_continue(next_poem, question_bank)
+
+
+def start_quiz_or_continue(poem_name: str, question_bank: list[QuizQuestion]) -> None:
+    """开始指定诗词的测验。"""
+    print(f"\n切换到《{poem_name}》进行学习。")
+    handle_quiz(poem_name, question_bank)
 
 
 def start_shell() -> None:
