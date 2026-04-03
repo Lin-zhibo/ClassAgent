@@ -7,3 +7,5 @@ langchain-openai>=0.2.0
 chromadb>=0.5.0
 pandas>=2.0.0
 aiosqlite>=0.20.0
+fastapi
+uvicorn
